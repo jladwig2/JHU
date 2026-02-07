@@ -1,11 +1,43 @@
 #include <AccelStepper.h>
-#include <avr/pgmspace.h>  // For PROGMEM support
+#include <avr/pgmspace.h>
 #include <Wire.h>
+
+#define DEBUG false
 
 #define MOTOR_CTRL_ADDR 10
 #define MOTOR_INTERFACE_TYPE AccelStepper::DRIVER
 #define VRX_PIN A1
 #define VRY_PIN A0
+
+// Command Message Types
+#define MSG_CMD_CONTROL    0x00
+#define MSG_CMD_LOCATION   0x01
+
+// Control Payloads
+#define MSG_GAME_START     0x01
+#define MSG_GAME_OVER      0x02
+
+// Response Codes
+#define MSG_RESP_LOCATION     0x01
+#define MSG_RESP_CALIBRATING  0x02
+#define MSG_RESP_CALIBRATED   0x03
+#define MSG_RESP_UNKNOWN      0xFF
+
+// Joystick Thresholds
+#define JOYSTICK_CENTER         512
+#define JOYSTICK_THRESHOLD_LOW  200
+#define JOYSTICK_THRESHOLD_HIGH 800
+#define JOYSTICK_MAX            1023
+
+// Motor Constants
+#define MOTOR_MAX_SPEED           1000
+#define DIRECTION_CHANGE_OFFSET   25
+#define SPEED_DIVISOR             0.225f
+#define CALIBRATION_SPEED_DIVISOR 0.1f
+
+// Ultrasonic Calibration
+#define CALIBRATION_DISTANCE_CM   4.2f
+#define SOUND_SPEED_CM_PER_US     0.0343f
 
 uint8_t lastCmd = 0, lastPayload = 0;
 bool gameActive     = false;  // only move when true
@@ -27,12 +59,12 @@ char blockedX = 'N';
 char blockedY = 'N';
 uint8_t locationVal;
 
-// Global grid “player” position.
+// Global grid position.
 uint8_t currentX = 0;
 uint8_t currentY = 0;
 
-// ---------- GRID SETUP ----------
-// Stored as bytes in flash.
+// Grid setup. Numbers other than 1 are specific rooms
+// These map to room positions on the physical board
 const uint8_t gridWidth = 21;
 const uint8_t gridHeight = 28;
 const uint8_t gridData[] PROGMEM = {
@@ -87,14 +119,12 @@ void setup() {
   pinMode(trigPin, OUTPUT);
   pinMode(echoPin, INPUT);
 
-  leftStepper.setMaxSpeed(1000);
+  leftStepper.setMaxSpeed(MOTOR_MAX_SPEED);
   leftStepper.setSpeed(0);
-  rightStepper.setMaxSpeed(1000);
+  rightStepper.setMaxSpeed(MOTOR_MAX_SPEED);
   rightStepper.setSpeed(0);
 
   lastHorizontalMove = 'N';
-
-  //printGrid();
 }
 
 void loop() {
@@ -111,32 +141,35 @@ void loop() {
   } 
   // Read the joystick values.
   xIn = analogRead(VRX_PIN);
-  yIn = -1 * analogRead(VRY_PIN) + 1023;
-  //Serial.print("xIn: " );
-  //Serial.println(xIn);
-  //Serial.print("yIn: ");
-  //Serial.println(yIn);
+  yIn = -1 * analogRead(VRY_PIN) + JOYSTICK_MAX;
+#if DEBUG
+  Serial.print("xIn: ");
+  Serial.println(xIn);
+  Serial.print("yIn: ");
+  Serial.println(yIn);
+#endif
 
-  if (abs(xIn - 512) > abs(yIn - 512)) {
-    if (xIn < 200 && blockedX != 'L') {
+  // Read input and set the move 
+  if (abs(xIn - JOYSTICK_CENTER) > abs(yIn - JOYSTICK_CENTER)) {
+    if (xIn < JOYSTICK_THRESHOLD_LOW && blockedX != 'L') {
       if (lastHorizontalMove != 'R') {
         leftTarget = leftStepper.currentPosition() - moveSteps;
         rightTarget = rightStepper.currentPosition() - moveSteps;
         move = 'L';
       } else {
-        leftTarget = leftStepper.currentPosition() - moveSteps - 25;
-        rightTarget = rightStepper.currentPosition() - moveSteps - 25;
+        leftTarget = leftStepper.currentPosition() - moveSteps - DIRECTION_CHANGE_OFFSET;
+        rightTarget = rightStepper.currentPosition() - moveSteps - DIRECTION_CHANGE_OFFSET;
         move = 'L';
       }
-      
-    } else if (xIn > 800 && blockedX != 'R') {
+
+    } else if (xIn > JOYSTICK_THRESHOLD_HIGH && blockedX != 'R') {
       if (lastHorizontalMove != 'L') {
         leftTarget = leftStepper.currentPosition() + moveSteps;
         rightTarget = rightStepper.currentPosition() + moveSteps;
         move = 'R';
       } else {
-        leftTarget = leftStepper.currentPosition() + moveSteps + 25;
-        rightTarget = rightStepper.currentPosition() + moveSteps + 25;
+        leftTarget = leftStepper.currentPosition() + moveSteps + DIRECTION_CHANGE_OFFSET;
+        rightTarget = rightStepper.currentPosition() + moveSteps + DIRECTION_CHANGE_OFFSET;
         move = 'R';
       }
       
@@ -146,11 +179,11 @@ void loop() {
       move = 'N';
     }
   } else {
-    if (yIn < 200 && blockedY != 'D') {
+    if (yIn < JOYSTICK_THRESHOLD_LOW && blockedY != 'D') {
       leftTarget = leftStepper.currentPosition() - moveSteps;
       rightTarget = rightStepper.currentPosition() + moveSteps;
       move = 'D';
-    } else if (yIn > 800 && blockedY != 'U') {
+    } else if (yIn > JOYSTICK_THRESHOLD_HIGH && blockedY != 'U') {
       leftTarget = leftStepper.currentPosition() + moveSteps;
       rightTarget = rightStepper.currentPosition() - moveSteps;
       move = 'U';
@@ -161,22 +194,7 @@ void loop() {
     }
   }
 
-  leftStepper.moveTo(leftTarget);
-  rightStepper.moveTo(rightTarget);
-
-  leftStepper.setSpeed((leftStepper.targetPosition() - leftStepper.currentPosition()) / 0.225);
-  rightStepper.setSpeed((rightStepper.targetPosition() - rightStepper.currentPosition()) / 0.225);
-
-  // Run the steppers until they reach their targets.
-  while (abs(leftStepper.distanceToGo()) > 0 || abs(rightStepper.distanceToGo()) > 0) {
-    if (abs(leftStepper.distanceToGo()) > 0 && abs(rightStepper.distanceToGo()) > 0) {
-      leftStepper.runSpeed();
-      rightStepper.runSpeed();
-    } else {
-      rightStepper.moveTo(rightStepper.currentPosition());
-      leftStepper.moveTo(leftStepper.currentPosition());
-    } 
-  }
+  runSteppersToTarget(SPEED_DIVISOR);
 
   updatePosition(move);
 
@@ -185,46 +203,60 @@ void loop() {
   }
 }
 
+// Move both steppers to leftTarget/rightTarget and wait until complete.
+void runSteppersToTarget(float speedDivisor) {
+  leftStepper.moveTo(leftTarget);
+  rightStepper.moveTo(rightTarget);
+
+  leftStepper.setSpeed((leftStepper.targetPosition() - leftStepper.currentPosition()) / speedDivisor);
+  rightStepper.setSpeed((rightStepper.targetPosition() - rightStepper.currentPosition()) / speedDivisor);
+
+  while (abs(leftStepper.distanceToGo()) > 0 || abs(rightStepper.distanceToGo()) > 0) {
+    if (abs(leftStepper.distanceToGo()) > 0 && abs(rightStepper.distanceToGo()) > 0) {
+      leftStepper.runSpeed();
+      rightStepper.runSpeed();
+    } else {
+      rightStepper.moveTo(rightStepper.currentPosition());
+      leftStepper.moveTo(leftStepper.currentPosition());
+    }
+  }
+}
+
 void onI2CReceive(int count) {
   if (count < 1) return;
   lastCmd = Wire.read();
   if (Wire.available()) lastPayload = Wire.read();
 
-  if (lastCmd == 0x00) {
-    // control message
-    if (lastPayload == 0x02) {
-      // game over → recalibrate
+  if (lastCmd == MSG_CMD_CONTROL) {
+    if (lastPayload == MSG_GAME_OVER) {
       gameActive    = false;
       gotGameOver = true;
     }
-    else if (lastPayload == 0x01) {
-      // game start
+    else if (lastPayload == MSG_GAME_START) {
       gameActive    = true;
       gotGameOver = false;
       calibrateDone = false;
     }
   }
-  // 0x01 = location request -> handled in onI2CRequest
+  // MSG_CMD_LOCATION handled in onI2CRequest
 }
 
 // Called when LCD does requestFrom(MOTOR_CTRL_ADDR, …)
 void onI2CRequest() {
   switch (lastCmd) {
-    case 0x00: 
-      //Serial.println("Poll for calibration received");
-      // master is asking “have you finished recalibrating?”
-      Wire.write(calibrateDone ? (uint8_t)0x03 : (uint8_t)0x02);
+    case MSG_CMD_CONTROL:
+      // master is asking "have you finished recalibrating?"
+      Wire.write(calibrateDone ? (uint8_t)MSG_RESP_CALIBRATED : (uint8_t)MSG_RESP_CALIBRATING);
       break;
 
-    case 0x01:
-      // master is asking for the magnet’s location
-      //Serial.println("Poll for location received");
-      Wire.write((uint8_t)0x01);      // message type
-      Wire.write(locationVal);        // latest cell value
+    case MSG_CMD_LOCATION:
+      // master is asking for the magnet's location
+      Wire.write((uint8_t)MSG_RESP_LOCATION);
+      Wire.write(locationVal);
       break;
 
     default:
-      Wire.write((uint8_t)0xFF);      // “unknown”
+      Wire.write((uint8_t)MSG_RESP_UNKNOWN);
   }
 }
 
@@ -258,7 +290,6 @@ void updatePosition(char cmd) {
   int newX = currentX;
   int newY = currentY;
   
-  // Update logical coordinates: 
   // 'L': decrease X; 'R': increase X; 'U': increase Y; 'D': decrease Y.
   if (cmd == 'L') newX--;
   else if (cmd == 'R') newX++;
@@ -279,21 +310,21 @@ void updatePosition(char cmd) {
   uint8_t physRow = physicalRow(currentY);
   uint8_t cellVal = pgm_read_byte_near(gridData + physRow * gridWidth + currentX);
 
-  //Serial.print(F("Updated grid (logical pos): "));
-  //Serial.print(currentX);
-  //Serial.print(F(","));
-  //Serial.print(currentY);
-  //Serial.print(F(" - Physical cell value: "));
-  //Serial.println(cellVal);
+#if DEBUG
+  Serial.print(F("Position: "));
+  Serial.print(currentX);
+  Serial.print(F(","));
+  Serial.print(currentY);
+  Serial.print(F(" - Cell: "));
+  Serial.println(cellVal);
+  printGrid();
+#endif
 
   locationVal = cellVal;
-  
-  //printGrid();
 
   blockedY = 'N'; // 'U' if up is blocked, 'D' if down is blocked, else 'N'
   blockedX = 'N'; // 'L' if left is blocked, 'R' if right is blocked, else 'N'
 
-  // --- Check Vertical Neighbors ---
   // For logical UP, we check (currentY + 1). In our grid, the top logical row is gridHeight - 1.
   if (currentY == gridHeight - 1) {
     blockedY = 'U';  // Cannot move up if already at the top logical row.
@@ -314,7 +345,6 @@ void updatePosition(char cmd) {
       blockedY = 'D';
   }
 
-  // --- Check Horizontal Neighbors ---
   // For LEFT, check if at leftmost edge or if the cell to the left is blocked.
   if (currentX == 0) {
     blockedX = 'L';
@@ -337,50 +367,17 @@ void updatePosition(char cmd) {
 
 void resetMotor() {
   while (currentY != 0) {
-    Serial.print("Resetting motor");
+    Serial.println("Resetting motor");
     leftTarget = leftStepper.currentPosition() - moveSteps;
     rightTarget = rightStepper.currentPosition() + moveSteps;
-
-    leftStepper.moveTo(leftTarget);
-    rightStepper.moveTo(rightTarget);
-
-    leftStepper.setSpeed((leftStepper.targetPosition() - leftStepper.currentPosition()) / 0.225);
-    rightStepper.setSpeed((rightStepper.targetPosition() - rightStepper.currentPosition()) / 0.225);
-
-    // Run the steppers until they reach their targets.
-    while (abs(leftStepper.distanceToGo()) > 0 || abs(rightStepper.distanceToGo()) > 0) {
-      if (abs(leftStepper.distanceToGo()) > 0 && abs(rightStepper.distanceToGo()) > 0) {
-        leftStepper.runSpeed();
-        rightStepper.runSpeed();
-      } else {
-        rightStepper.moveTo(rightStepper.currentPosition());
-        leftStepper.moveTo(leftStepper.currentPosition());
-      } 
-    }
-
+    runSteppersToTarget(SPEED_DIVISOR);
     currentY = currentY - 1;
   }
 
   while (currentX != 0) {
     leftTarget = leftStepper.currentPosition() - moveSteps;
     rightTarget = rightStepper.currentPosition() - moveSteps;
-
-    leftStepper.moveTo(leftTarget);
-    rightStepper.moveTo(rightTarget);
-
-    leftStepper.setSpeed((leftStepper.targetPosition() - leftStepper.currentPosition()) / 0.225);
-    rightStepper.setSpeed((rightStepper.targetPosition() - rightStepper.currentPosition()) / 0.225);
-
-    // Run the steppers until they reach their targets.
-    while (abs(leftStepper.distanceToGo()) > 0 || abs(rightStepper.distanceToGo()) > 0) {
-      if (abs(leftStepper.distanceToGo()) > 0 && abs(rightStepper.distanceToGo()) > 0) {
-        leftStepper.runSpeed();
-        rightStepper.runSpeed();
-      } else {
-        rightStepper.moveTo(rightStepper.currentPosition());
-        leftStepper.moveTo(leftStepper.currentPosition());
-      } 
-    }
+    runSteppersToTarget(SPEED_DIVISOR);
     currentX = currentX - 1;
   }
 }
@@ -388,7 +385,7 @@ void resetMotor() {
 void reCalibrate() {
   Serial.println("Calibration started");
   float distance = 10.0;
-  while (distance > 4.2) {
+  while (distance > CALIBRATION_DISTANCE_CM) {
     delayMicroseconds(2);
     digitalWrite(trigPin, HIGH);
     delayMicroseconds(10);
@@ -396,55 +393,25 @@ void reCalibrate() {
 
     long duration = pulseIn(echoPin, HIGH);
 
-    distance = duration * 0.0343 / 2.;
+    distance = duration * SOUND_SPEED_CM_PER_US / 2.0;
+#if DEBUG
     Serial.print("Distance:");
     Serial.print(distance);
     Serial.println();
+#endif
 
-    if (distance > 4.2) {
+    if (distance > CALIBRATION_DISTANCE_CM) {
       leftTarget = leftStepper.currentPosition() - moveSteps;
       rightTarget = rightStepper.currentPosition() - moveSteps;
-
-      leftStepper.moveTo(leftTarget);
-      rightStepper.moveTo(rightTarget);
-
-      leftStepper.setSpeed((leftStepper.targetPosition() - leftStepper.currentPosition()) / 0.225);
-      rightStepper.setSpeed((rightStepper.targetPosition() - rightStepper.currentPosition()) / 0.225);
-
-      // Run the steppers until they reach their targets.
-      while (abs(leftStepper.distanceToGo()) > 0 || abs(rightStepper.distanceToGo()) > 0) {
-        if (abs(leftStepper.distanceToGo()) > 0 && abs(rightStepper.distanceToGo()) > 0) {
-          leftStepper.runSpeed();
-          rightStepper.runSpeed();
-        } else {
-          rightStepper.moveTo(rightStepper.currentPosition());
-          leftStepper.moveTo(leftStepper.currentPosition());
-        } 
-      }
+      runSteppersToTarget(SPEED_DIVISOR);
 
       leftTarget = leftStepper.currentPosition() - moveSteps / 5;
       rightTarget = rightStepper.currentPosition() + moveSteps / 5;
-
-      leftStepper.moveTo(leftTarget);
-      rightStepper.moveTo(rightTarget);
-
-      leftStepper.setSpeed((leftStepper.targetPosition() - leftStepper.currentPosition()) / 0.1);
-      rightStepper.setSpeed((rightStepper.targetPosition() - rightStepper.currentPosition()) / 0.1);
-
-      // Run the steppers until they reach their targets.
-      while (abs(leftStepper.distanceToGo()) > 0 || abs(rightStepper.distanceToGo()) > 0) {
-        if (abs(leftStepper.distanceToGo()) > 0 && abs(rightStepper.distanceToGo()) > 0) {
-          leftStepper.runSpeed();
-          rightStepper.runSpeed();
-        } else {
-          rightStepper.moveTo(rightStepper.currentPosition());
-          leftStepper.moveTo(leftStepper.currentPosition());
-        } 
-      }
+      runSteppersToTarget(CALIBRATION_SPEED_DIVISOR);
     } else {
       break;
     }
-  } 
+  }
 }
 
 
