@@ -1,7 +1,20 @@
 #include <Servo.h>
 #include <Wire.h>
 
-// I²C address for this game-control board
+// Command Message Types
+#define MSG_CMD_CONTROL      0x00
+#define MSG_CMD_HAUNTED      0x02
+#define MSG_CMD_ROOM_FIXED   0x03
+
+// Control Payloads
+#define MSG_GAME_START       0x01
+#define MSG_GAME_OVER        0x02
+
+// Response Codes
+#define MSG_RESP_HAUNTED     0x02
+#define MSG_RESP_UNKNOWN     0xFF
+
+// I2C address for this game-control board
 #define GAME_CTRL_ADDR 30
 
 // Room LED pins (indexed 0..4)
@@ -48,6 +61,16 @@ void stopMotor(int which);
 void dangerLED(int roomIdx, int tMax);
 void hauntedLED(int roomIdx);
 void generateHaunt();
+void gameDelay(unsigned long ms);
+
+// Delay that exits early if game becomes inactive
+void gameDelay(unsigned long ms) {
+  unsigned long start = millis();
+  while (millis() - start < ms) {
+    if (!gameActive) return;
+    delay(10);
+  }
+}
 
 void setup() {
   Wire.begin(GAME_CTRL_ADDR);
@@ -80,7 +103,7 @@ void loop() {
   // Idle pause between haunt cycles
   resetAllEffects();
   allLED(0);
-  delay(random(1000, 2000));
+  gameDelay(random(1000, 2000));
 
   // Single haunt per cycle; phase changes frequency
   switch (phase) {
@@ -93,7 +116,7 @@ void loop() {
       timeDangerMax = 10;
       for (int i = 0; i < 3 && gameActive; i++) {
         generateHaunt();
-        delay(random(500, 2000));
+        gameDelay(random(500, 2000));
       }
       break;
 
@@ -101,22 +124,23 @@ void loop() {
       timeDangerMax = 5;
       for (uint8_t i = 0; i < numHauntable && gameActive; i++) {
         generateHaunt();
-        delay(random(500, 2000));
+        gameDelay(random(500, 2000));
       }
       break;
   }
 }
 
-// I²C: receive control or fixed-room notifications
+// I2C: receive control or fixed-room notifications
 void onReceive(int count) {
   if (count < 1) return;
   lastCmd     = Wire.read();
   lastPayload = (Wire.available() ? Wire.read() : 0);
 
-  if (lastCmd == 0x00) {
-    if (lastPayload == 0x01)      gameActive = true;
-    else if (lastPayload == 0x02) {
+  if (lastCmd == MSG_CMD_CONTROL) {
+    if (lastPayload == MSG_GAME_START)      gameActive = true;
+    else if (lastPayload == MSG_GAME_OVER) {
       gameActive = false;
+      currentHauntedID = 0;
       for (uint8_t i = 0; i < NUM_ROOMS; i++) {
         hauntableRooms[i] = i + 2;    // since rooms are IDs 2..6
       }
@@ -124,7 +148,7 @@ void onReceive(int count) {
       resetAllEffects();
     }
   }
-  else if (lastCmd == 0x03) {
+  else if (lastCmd == MSG_CMD_ROOM_FIXED) {
     // Room Fixed: remove from hauntable list
     for (uint8_t i = 0; i < numHauntable; i++) {
       if (hauntableRooms[i] == lastPayload) {
@@ -139,11 +163,11 @@ void onReceive(int count) {
 
 // I²C: report current haunted ID only if in solid phase
 void onRequest() {
-  if (lastCmd == 0x02 && isHauntedSolid) {
-    Wire.write((uint8_t)0x02);
+  if (lastCmd == MSG_CMD_HAUNTED && isHauntedSolid) {
+    Wire.write((uint8_t)MSG_RESP_HAUNTED);
     Wire.write(currentHauntedID);
   } else {
-    Wire.write((uint8_t)0xFF);
+    Wire.write((uint8_t)MSG_RESP_UNKNOWN);
   }
 }
 
@@ -152,12 +176,12 @@ void generateHaunt() {
   if (numHauntable == 0) return;
   if (numHauntable == 1) {
     isHauntedSolid = false;
-    delay(1000);
+    gameDelay(1000);
   }
   uint8_t idx = random(numHauntable);
   uint8_t id  = hauntableRooms[idx];       // ID in [2..6]
   currentHauntedID = id;
-  int roomIdx = id - 2;                    // map ID→0..4
+  int roomIdx = id - 2;                    // map ID 0..4
 
   // Blinking phase: no haunted-room reported
   isHauntedSolid = false;
@@ -171,9 +195,9 @@ void generateHaunt() {
 void dangerLED(int roomIdx, int tMax) {
   for (int i = 0; i <= tMax && gameActive; i++) {
     analogWrite(ledRoomPins[roomIdx], 255);
-    delay(100);
+    gameDelay(100);
     analogWrite(ledRoomPins[roomIdx], 0);
-    delay(100);
+    gameDelay(100);
   }
 }
 
@@ -226,10 +250,10 @@ void runMotor(int which) {
   analogWrite(enPins[which], 255);
   digitalWrite(in1Pins[which], HIGH);
   digitalWrite(in2Pins[which], LOW);
-  delay(400);
+  gameDelay(400);
   digitalWrite(in1Pins[which], LOW);
   digitalWrite(in2Pins[which], HIGH);
-  delay(400);
+  gameDelay(400);
 }
 
 void stopMotor(int which) {
