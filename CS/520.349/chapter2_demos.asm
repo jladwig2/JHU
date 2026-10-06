@@ -9,72 +9,95 @@ DDRB EQU $0005
 DDRD EQU $0007
 ;
 	   	org $FFFE
-        fdb mainA               ;Reset Vector
-			org $EC00				;Flash
+        fdb mainC               ;Reset Vector
+		org $EC00				;Flash
 ;
 ;Turn on some LEDs
 ;
 mainA:	mov #%11111100,DDRD		;bits 7-2 outputs for PTD
-			mov #%11000010,DDRB		;bits 1-0 and output_strobe
+		mov #%11000010,DDRB		;bits 1-0 and output_strobe
 	
-			;now do the LED pattern (just alternate)
-			mov #%10101000,PTD		;upper 6 bits alternate
-			mov #%10000000,PTB		;lower 2 bits alternate (but bits 7 and 6 here)
+		;now do the LED pattern (just alternate)
+		mov #%10101000,PTD		;upper 6 bits alternate
+		mov #%10000000,PTB		;lower 2 bits alternate (but bits 7 and 6 here)
 	
-			;output strobe (just pulse on off once)
-			bset 1,PTB
-			bclr 1,PTB
-			stop
+		;output strobe (just pulse on off once)
+		bset 1,PTB
+		bclr 1,PTB
+		bra mainA
 ;
 ;Control 6 LEDs with column 1 of the keypad and the upper two switches.
 ;
 mainB:	mov #%11111100,DDRD	  	;drive bus and scan_sink latch
-			mov #%11010110,DDRB
+		mov #%11010110,DDRB
 		 
-		 	clr PTD					;b7 through b2 = 0
+		clr PTD					;b7 through b2 = 0
         bclr 7,PTB				;b1 = 0
         bset 6,PTB				;latch col1
 
-			bset 2,PTB				;Scan_Sink to 1
+		bset 2,PTB				;Scan_Sink to 1
         bclr 2,PTB              ;and now 0
 	
-			bset 4,DDRB   			;make /Input_Strobe an output pin
+		bset 4,DDRB   			;make /Input_Strobe an output pin
         bset 1,DDRB    			;make Output_Strobe an output pin
 	
 loopB:	mov #%11111100,DDRD	    ;setup to latch col1 for input
-			mov #%11010110,DDRB
+		mov #%11010110,DDRB
 	
-			clr PTD
+		clr PTD
 	
-			bclr 7,PTB  
+		bclr 7,PTB  
         bset 6,PTB
 	
-			bset 2,PTB   
+		bset 2,PTB   
         bclr 2,PTB
 	
-			clr DDRD  	 	   		;start of actual ops (after setup)
+		clr DDRD  	 	   		;start of actual ops (after setup)
 
-			bclr 4,PTB
-			bclr 1,PTB
+		bclr 4,PTB
+		bclr 1,PTB
 	
-			lda PTD
+		lda PTD
 	
-			bset 4,PTB
-			bclr 1,PTB
+		bset 4,PTB
+		bclr 1,PTB
 	
-			mov #%11111100,DDRD 	;PTD bits 7-2 are now output drivers
+		mov #%11111100,DDRD 	;PTD bits 7-2 are now output drivers
 	
-			sta PTD
+		sta PTD
 	
-			bset 1,PTB
+		bset 1,PTB
 	
-			bclr 1,PTB				;closes latch, freezing LED states
+		bclr 1,PTB				;closes latch, freezing LED states
         bset 4,PTB   
 	
-			bra loopB
+		bra loopB
 ;
 ;Sound a tone
 ;
-mainC:
+mainC:  bset 0,$001F
+		mov #%00001000,DDRB 	;make PTB3 an output for tone bit
+	   	clr PTB		   			;make sure PTB clear
+tone:  	bset 3,PTB				;produce tone
+		jsr delay_tone
+		bclr 3,PTB
+		jsr delay_tone
+		bra tone
+delay_tone:			  			;3000 cycles (1/2 of 6000 total for 1 kHz tone)
+		lda #$FA				;250*15 cycles per iteration
+tone_loop:	 	  	  			
+		deca					;1 cycle
+		nop
+		nop
+		nop
+		nop
+		nop
+		nop
+		nop
+		nop
+		nop
+		beq return				;3 cycles
+		bra tone_loop			;3 cycles
+return: rts
 	
 	

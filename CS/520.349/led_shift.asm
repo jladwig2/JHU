@@ -18,9 +18,9 @@
         org $90                 ;ioJK3.asm uses RAM from $80-$8F
 ;
 pattern:
-	rmb 1			;current pattern on the LEDs
-flags:  rmb 1			;flags for direction and value
-temp:	rmb 1			;throwaway temp var
+	rmb 1						;current pattern on the LEDs
+flags:  rmb 1					;flags for direction and value
+temp:	rmb 1					;throwaway temp var
 ;
 ; Constants for flag bits
 ;
@@ -37,15 +37,15 @@ FLAG_INNER	equ 3
 ; ioJK3.asm orgs its code to $EC00, the start of flash ROM
 ; Code here continues in memory at the end of the ioJK3.asm code
 ;
-start:  mov #%00010000,ptb      ;all low except for /Input_Strobe
-        mov #%00111110,ddrb     ;b1, b0, com inputs, others output
-                                ;ptd is already in input mode from reset, no need to alter
-        bset 0,config1          ;disable Computer Operating Properly watchdog timer
+start:  clra
+		jsr leds	  	 		;init to clear leds
+		bset 0,config1          ;disable Computer Operating Properly watchdog timer
         rsp                     ;initialize stack pointer to $00FF
         clra
         jsr digit               ;turn off current sink
-	clr pattern		;clear vars
-	clr flags
+		clr pattern				;clear vars
+		clr flags
+		clr temp
 ;
 ;
 wait_shift:
@@ -53,7 +53,7 @@ wait_shift:
 	;delay first ensures we always delay after exiting inner loop
 	jsr delay
 	brset FLAG_SHIFT_SET,flags,shift
-	jsr scan_matrix		;if shift flag 0 then scan, always sets
+	jsr scan_matrix				;if shift flag 0 then scan, always sets
 	bra wait_shift
 shift:
 	;perform the shift, don't loop this part
@@ -97,6 +97,7 @@ scan_matrix:
 	;check 0 (col 0 row 0)
 	lda #%00000001 		;col bit
 	jsr digit		;set latch
+	jsr digit_delay
 	jsr input		;get output
 	sta temp
 	brclr 4,temp,check_1	;check row bit %00010000 branch if 0
@@ -105,6 +106,7 @@ check_1:
 	;check 1 (col 1 row 0)
 	lda #%00000010
 	jsr digit
+	jsr digit_delay
 	jsr input
 	sta temp
 	brclr 4,temp,check_A
@@ -113,6 +115,7 @@ check_A:
 	;check A (col 2 row 2)
 	lda #%00000100
 	jsr digit
+	jsr digit_delay
 	jsr input
 	sta temp
 	brclr 6,temp,check_col3
@@ -121,6 +124,7 @@ check_col3:
 	;check col3 for B and F (col 3 rows 2 and 3)
 	lda #%00001000
 	jsr digit
+	jsr digit_delay
 	jsr input
 	sta temp
 	brclr 6,temp,check_F
